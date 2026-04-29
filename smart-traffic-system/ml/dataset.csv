@@ -1,0 +1,5 @@
+timestamp,intersection_id,segment_id,speed_kmph,density,flow_rate,travel_time_seconds,signal_wait_seconds
+2026-04-25T08:00:00Z,INT-01,SEG-A,34,28,420,95,10
+2026-04-25T08:00:00Z,INT-01,SEG-B,18,74,610,180,35
+2026-04-25T08:05:00Z,INT-01,SEG-A,30,36,455,110,12
+2026-04-25T08:05:00Z,INT-01,SEG-B,15,82,650,205,40

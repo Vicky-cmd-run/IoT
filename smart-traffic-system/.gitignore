@@ -1,0 +1,23 @@
+.DS_Store
+**/.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.venv313/
+*.egg-info/
+.pytest_cache/
+coverage/
+*.log
+
+# Node
+node_modules/
+dist/
+
+# Secrets — never commit
+.env
+
+# Local dev only
+*.local
