@@ -78,16 +78,23 @@ export const corridorSeverity = (corridor, zoneMap) => {
 };
 
 /**
- * Dijkstra over the zone graph.
+ * A* over the zone graph.
  * costFn(zoneId) → number: entry cost of each neighbor zone.
  */
-const dijkstra = (source, destination, costFn) => {
+const heuristic = (source, destination) => {
+  const left = zoneLayout[source];
+  const right = zoneLayout[destination];
+  if (!left || !right) return 0;
+  return Math.hypot(left.x - right.x, left.y - right.y) / 100;
+};
+
+const aStar = (source, destination, costFn) => {
   const distances = new Map([[source, 0]]);
   const previous = new Map();
-  const queue = [{ zone: source, cost: 0 }];
+  const queue = [{ zone: source, cost: 0, priority: heuristic(source, destination) }];
 
   while (queue.length) {
-    queue.sort((a, b) => a.cost - b.cost);
+    queue.sort((a, b) => a.priority - b.priority);
     const current = queue.shift();
     if (!current) break;
     if (current.zone === destination) break;
@@ -98,7 +105,11 @@ const dijkstra = (source, destination, costFn) => {
       if (nextCost < (distances.get(neighbor.zone) ?? Infinity)) {
         distances.set(neighbor.zone, nextCost);
         previous.set(neighbor.zone, { zone: current.zone, corridorId: neighbor.corridorId });
-        queue.push({ zone: neighbor.zone, cost: nextCost });
+        queue.push({
+          zone: neighbor.zone,
+          cost: nextCost,
+          priority: nextCost + heuristic(neighbor.zone, destination),
+        });
       }
     }
   }
@@ -213,8 +224,8 @@ export const computeRouteOverlay = ({ selectedJourney, zoneMap, optimizationEnab
   } else {
     // --- Fallback: compute locally ---
     const sc = scenario || "accident";
-    const naiveCorrIds = dijkstra(source, destination, naiveCostFn(sc));
-    const aiCorrIds = dijkstra(source, destination, aiCostFn(zoneMap));
+    const naiveCorrIds = aStar(source, destination, naiveCostFn(sc));
+    const aiCorrIds = aStar(source, destination, aiCostFn(zoneMap));
     originalZones = corridorIdsToZonePath(source, naiveCorrIds);
     const tempRerouted = corridorIdsToZonePath(source, aiCorrIds);
     originalRisk = routeRiskScore(originalZones, zoneMap);

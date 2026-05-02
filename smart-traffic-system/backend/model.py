@@ -120,6 +120,21 @@ class JourneyRequest(BaseModel):
     destination_zone: str
 
 
+class SnapshotIngestionRequest(BaseModel):
+    timestamp: str | None = None
+    intersection_id: str = "BLR-CBD-LIVE"
+    source: str = "iot_gateway"
+    segments: list[SegmentSnapshot]
+
+
+class SnapshotIngestionResponse(BaseModel):
+    accepted: bool
+    source: str
+    timestamp: str
+    segment_count: int
+    mode: str
+
+
 class JourneyState(BaseModel):
     journey_id: str
     vehicle_id: str
@@ -136,6 +151,7 @@ class JourneyState(BaseModel):
     original_risk_score: float = 0.0
     rerouted_risk_score: float = 0.0
     reroute_reason: str = ""
+    decision_source: str = "simulation"
 
 
 class SimulationStateResponse(BaseModel):
@@ -145,6 +161,8 @@ class SimulationStateResponse(BaseModel):
     tick: int
     city_name: str
     active_alert: str
+    data_source: str = "simulation"
+    last_ingested_at: str | None = None
     zones: list[ZoneMetric]
     map_edges: list[MapEdgeMetric]
     history: list[SimulationSnapshotMetric]
@@ -156,6 +174,7 @@ class LiveDashboardResponse(BaseModel):
     summary: DashboardSummary | None
     prediction: PredictionResponse
     weather: dict
+    traffic: dict
     simulation: SimulationStateResponse
     commands: list[dict]
 

@@ -15,6 +15,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 
+from integrations import zone_traffic_overview
 from model import (
     DashboardSummary,
     ImprovementMetrics,
@@ -29,6 +30,8 @@ from model import (
     TrafficStateStore,
     ZoneMetric,
 )
+from network_topology import LEVEL_COST, ZONE_GRAPH, ZONE_LABELS
+from routing import astar_shortest_path
 from traci_handler import TraCICommandExecutor
 
 
@@ -39,28 +42,6 @@ def _congestion_band(density: float, speed_kmph: float) -> str:
         return "medium"
     return "low"
 
-
-# ---------------------------------------------------------------------------
-# Static zone topology — mirrors the frontend corridorGraph exactly
-# ---------------------------------------------------------------------------
-ZONE_GRAPH: dict[str, list[str]] = {
-    "north": ["central", "west", "east"],
-    "central": ["north", "west", "east", "south"],
-    "east": ["north", "central", "south"],
-    "west": ["north", "central", "south"],
-    "south": ["central", "east", "west"],
-}
-
-ZONE_LABELS: dict[str, str] = {
-    "north": "Vidhana Soudha Belt",
-    "south": "Majestic Link",
-    "east": "MG Road Axis",
-    "west": "KR Circle Corridor",
-    "central": "Cubbon Core",
-}
-
-# Risk cost weights — must match frontend baseZoneCost
-LEVEL_COST: dict[str, float] = {"low": 1.0, "medium": 3.5, "high": 8.0}
 
 # ---------------------------------------------------------------------------
 # Per-scenario congestion profiles  (density %, speed km/h, travel_time s)
@@ -176,7 +157,7 @@ def _compute_route_comparison(
     destination: str,
     scenario: str,
     zone_congestion: dict[str, str],
-) -> tuple[list[str], list[str], float, float, str]:
+) -> tuple[list[str], list[str], float, float, str, str]:
     """
     Returns (original_path, rerouted_path, original_risk, rerouted_risk, reason).
 
@@ -194,21 +175,53 @@ def _compute_route_comparison(
         else:
             naive_cost[zone] = 1.5   # slight penalty for detours
 
-    # AI cost: derived from live congestion levels
-    ai_cost: dict[str, float] = {
-        z: LEVEL_COST.get(zone_congestion.get(z, "low"), 1.0) for z in ZONE_GRAPH
-    }
-
     original_path = _dijkstra(source, destination, naive_cost)
-    rerouted_path = _dijkstra(source, destination, ai_cost)
+
+    live_traffic = zone_traffic_overview()
+    decision_source = "simulation_fallback"
+    ai_cost: dict[str, float] = {}
+
+    if live_traffic.get("status") in {"ok", "partial"}:
+        decision_source = "tomtom"
+        for zone in ZONE_GRAPH:
+            zone_live = live_traffic.get("zones", {}).get(zone, {})
+            ratio = zone_live.get("congestion_ratio_pct")
+            road_closed = zone_live.get("road_closure")
+            if road_closed:
+                ai_cost[zone] = 50.0
+                continue
+            if isinstance(ratio, (int, float)):
+                ai_cost[zone] = round(1.0 + (ratio / 12), 2)
+            else:
+                ai_cost[zone] = LEVEL_COST.get(zone_congestion.get(zone, "low"), 1.0)
+        reason = (
+            "TomTom live traffic was used for route selection. "
+            "The system fell back to internal congestion values for any missing live segments."
+        )
+    else:
+        ai_cost = {
+            zone: LEVEL_COST.get(zone_congestion.get(zone, "low"), 1.0) for zone in ZONE_GRAPH
+        }
+        reason = (
+            "TomTom traffic was unavailable, so the system used the internal congestion model "
+            "as a fallback for route selection."
+        )
+
+    weighted_graph = {
+        zone: {neighbor: ai_cost.get(neighbor, 1.0) for neighbor in neighbors}
+        for zone, neighbors in ZONE_GRAPH.items()
+    }
+    rerouted_path, _ = astar_shortest_path(weighted_graph, source, destination)
+    if not rerouted_path:
+        rerouted_path = original_path
 
     # If rerouted path costs more or equal, keep it but flag it honestly
     original_risk = _zone_path_risk(original_path, zone_congestion)
     rerouted_risk = _zone_path_risk(rerouted_path, zone_congestion)
+    scenario_reason = SCENARIO_REROUTE_REASON.get(scenario, "AI optimized route based on live congestion.")
+    combined_reason = f"{scenario_reason} {reason}"
 
-    reason = SCENARIO_REROUTE_REASON.get(scenario, "AI optimized route based on live congestion.")
-
-    return original_path, rerouted_path, original_risk, rerouted_risk, reason
+    return original_path, rerouted_path, original_risk, rerouted_risk, combined_reason, decision_source
 
 
 @dataclass
@@ -245,6 +258,9 @@ class DemoSimulationEngine:
     active_alert: str = "Demo engine ready — press Run Guided Demo"
     sumo_started: bool = False
     selected_journey: JourneyState | None = None
+    data_source: str = "simulation"
+    last_ingested_at: str | None = None
+    last_external_update_monotonic: float | None = None
     _lock: threading.RLock = field(default_factory=threading.RLock)
     _rng: random.Random = field(default_factory=lambda: random.Random(42))
 
@@ -266,6 +282,9 @@ class DemoSimulationEngine:
             self.tick = 0
             self.selected_journey = None
             self.latest_zones = []
+            self.data_source = "simulation"
+            self.last_ingested_at = None
+            self.last_external_update_monotonic = None
             self.active_alert = "Simulation reset — ready for new demo"
             self._rng = random.Random(42)
 
@@ -285,12 +304,32 @@ class DemoSimulationEngine:
             tick=self.tick,
             city_name=self.city_name,
             active_alert=self.active_alert,
+            data_source=self.data_source,
+            last_ingested_at=self.last_ingested_at,
             zones=self.latest_zones,
             map_edges=[],
             history=list(self.history),
             improvement=self._improvement_metrics(),
             selected_journey=self.selected_journey,
         )
+
+    def ingest_snapshot(self, snapshot: TrafficSnapshot) -> dict:
+        with self._lock:
+            self.store.add(snapshot)
+            self.data_source = snapshot.source or "external"
+            self.last_ingested_at = snapshot.timestamp
+            self.last_external_update_monotonic = time.monotonic()
+            self._apply_external_snapshot(snapshot)
+            self.active_alert = (
+                f"Live snapshot received from {self.data_source} with "
+                f"{len(snapshot.segments)} segment updates."
+            )
+        return {
+            "accepted": True,
+            "segment_count": len(snapshot.segments),
+            "timestamp": snapshot.timestamp,
+            "mode": self.data_source,
+        }
 
     def latest_summary(self) -> DashboardSummary | None:
         if not self.latest_zones:
@@ -315,7 +354,7 @@ class DemoSimulationEngine:
 
         zone_congestion = {z.zone_id: z.congestion_level for z in self.latest_zones}
 
-        original_path, rerouted_path, orig_risk, rerou_risk, reason = _compute_route_comparison(
+        original_path, rerouted_path, orig_risk, rerou_risk, reason, decision_source = _compute_route_comparison(
             src, dst, self.scenario, zone_congestion
         )
 
@@ -345,6 +384,7 @@ class DemoSimulationEngine:
             original_risk_score=round(orig_risk, 2),
             rerouted_risk_score=round(rerou_risk, 2) if rerouted else round(orig_risk, 2),
             reroute_reason=reason if rerouted else "No better route found — original path is already optimal.",
+            decision_source=decision_source,
         )
         return self.selected_journey
 
@@ -361,6 +401,10 @@ class DemoSimulationEngine:
     def _tick_update(self) -> None:
         t = self.tick
         self.tick += 1
+
+        if self._external_feed_is_fresh():
+            self._refresh_selected_journey_for_current_zones()
+            return
 
         profile = SCENARIO_PROFILES.get(self.scenario, SCENARIO_PROFILES["accident"])
         baseline_profile = BASELINE_PROFILES.get(self.scenario, BASELINE_PROFILES["accident"])
@@ -413,33 +457,7 @@ class DemoSimulationEngine:
         self.baseline_speed = bl_s_sum / n
         self.baseline_travel_time = bl_t_sum / n
 
-        # Advance selected journey ETA
-        if self.selected_journey and self.selected_journey.status == "active":
-            remaining = max(0.0, self.selected_journey.estimated_travel_time_seconds - 2.0)
-            if remaining <= 0:
-                self.selected_journey.status = "completed"
-            else:
-                self.selected_journey.estimated_travel_time_seconds = round(remaining, 2)
-
-            # Refresh route comparison with latest congestion
-            if self.selected_journey.status == "active":
-                zone_congestion = {z.zone_id: z.congestion_level for z in zones}
-                orig_p, rerou_p, orig_r, rerou_r, reason = _compute_route_comparison(
-                    self.selected_journey.source_zone,
-                    self.selected_journey.destination_zone,
-                    self.scenario,
-                    zone_congestion,
-                )
-                paths_differ = orig_p != rerou_p
-                rerouted = paths_differ and self.optimization_enabled and rerou_r < orig_r
-                self.selected_journey.original_zone_path = orig_p
-                self.selected_journey.rerouted_zone_path = rerou_p if rerouted else orig_p
-                self.selected_journey.original_risk_score = round(orig_r, 2)
-                self.selected_journey.rerouted_risk_score = round(rerou_r, 2) if rerouted else round(orig_r, 2)
-                self.selected_journey.rerouted = rerouted
-                self.selected_journey.reroute_reason = (
-                    reason if rerouted else "No better route found — original path is already optimal."
-                )
+        self._refresh_selected_journey_for_current_zones()
 
         timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         self.store.add(TrafficSnapshot(
@@ -471,6 +489,8 @@ class DemoSimulationEngine:
             f"{hotspot.label} is under {hotspot.congestion_level} congestion "
             f"({hotspot.density:.0f}% density, {hotspot.speed_kmph:.0f} km/h)."
         )
+        self.data_source = "simulation"
+        self.last_ingested_at = None
 
     def _best_signal_plan(self) -> SignalPlan | None:
         if not self.latest_zones:
@@ -496,4 +516,80 @@ class DemoSimulationEngine:
             average_speed_gain_pct=round(
                 max(0.0, (self.optimized_speed - bl_speed) / bl_speed * 100), 2
             ),
+        )
+
+    def _external_feed_is_fresh(self) -> bool:
+        if self.last_external_update_monotonic is None:
+            return False
+        return (time.monotonic() - self.last_external_update_monotonic) < 12
+
+    def _apply_external_snapshot(self, snapshot: TrafficSnapshot) -> None:
+        zones_by_id = {zone.zone_id: zone for zone in self.latest_zones}
+
+        for segment in snapshot.segments:
+            zone_id = segment.segment_id.lower()
+            label = ZONE_LABELS.get(zone_id, segment.segment_id.replace("_", " ").title())
+            zones_by_id[zone_id] = ZoneMetric(
+                zone_id=zone_id,
+                label=label,
+                density=round(segment.density, 2),
+                speed_kmph=round(segment.speed_kmph, 2),
+                travel_time_seconds=round(segment.travel_time_seconds, 2),
+                congestion_level=_congestion_band(segment.density, segment.speed_kmph),
+                active_signal_green_seconds=45 if segment.density >= 45 else 30,
+                rerouted_vehicles=0,
+            )
+
+        self.latest_zones = [zones_by_id[zone_id] for zone_id in ZONE_LABELS if zone_id in zones_by_id]
+        if not self.latest_zones:
+            return
+
+        self.optimized_density = sum(zone.density for zone in self.latest_zones) / len(self.latest_zones)
+        self.optimized_speed = sum(zone.speed_kmph for zone in self.latest_zones) / len(self.latest_zones)
+        self.optimized_travel_time = (
+            sum(zone.travel_time_seconds for zone in self.latest_zones) / len(self.latest_zones)
+        )
+        self.baseline_density = self.optimized_density
+        self.baseline_speed = self.optimized_speed
+        self.baseline_travel_time = self.optimized_travel_time
+        self.history.append(
+            SimulationSnapshotMetric(
+                timestamp=snapshot.timestamp,
+                average_speed_kmph=round(self.optimized_speed, 2),
+                average_density=round(self.optimized_density, 2),
+                baseline_travel_time_seconds=round(self.baseline_travel_time, 2),
+                optimized_travel_time_seconds=round(self.optimized_travel_time, 2),
+            )
+        )
+        self._refresh_selected_journey_for_current_zones()
+
+    def _refresh_selected_journey_for_current_zones(self) -> None:
+        if not self.selected_journey or self.selected_journey.status != "active":
+            return
+
+        remaining = max(0.0, self.selected_journey.estimated_travel_time_seconds - 2.0)
+        if remaining <= 0:
+            self.selected_journey.status = "completed"
+            return
+
+        self.selected_journey.estimated_travel_time_seconds = round(remaining, 2)
+        zone_congestion = {zone.zone_id: zone.congestion_level for zone in self.latest_zones}
+        orig_path, rerouted_path, orig_risk, rerouted_risk, reason, decision_source = _compute_route_comparison(
+            self.selected_journey.source_zone,
+            self.selected_journey.destination_zone,
+            self.scenario,
+            zone_congestion,
+        )
+        paths_differ = orig_path != rerouted_path
+        rerouted = paths_differ and self.optimization_enabled and rerouted_risk < orig_risk
+        self.selected_journey.original_zone_path = orig_path
+        self.selected_journey.rerouted_zone_path = rerouted_path if rerouted else orig_path
+        self.selected_journey.original_risk_score = round(orig_risk, 2)
+        self.selected_journey.rerouted_risk_score = (
+            round(rerouted_risk, 2) if rerouted else round(orig_risk, 2)
+        )
+        self.selected_journey.rerouted = rerouted
+        self.selected_journey.decision_source = decision_source
+        self.selected_journey.reroute_reason = (
+            reason if rerouted else "No better route found — original path is already optimal."
         )

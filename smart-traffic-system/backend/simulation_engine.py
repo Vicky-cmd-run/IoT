@@ -62,6 +62,8 @@ class RealSUMOSimulationEngine:
     optimized_travel_time: float = 0.0
     active_alert: str = "SUMO engine ready"
     sumo_started: bool = False
+    data_source: str = "sumo"
+    last_ingested_at: str | None = None
     net: sumolib.net.Net | None = None
     net_path: Path | None = None
     sumo_config_path: Path | None = None
@@ -121,12 +123,28 @@ class RealSUMOSimulationEngine:
             tick=self.tick,
             city_name=self.city_name,
             active_alert=self.active_alert,
+            data_source=self.data_source,
+            last_ingested_at=self.last_ingested_at,
             zones=self.latest_zones,
             map_edges=self.latest_map_edges,
             history=list(self.history),
             improvement=self._improvement_metrics(),
             selected_journey=self.selected_journey,
         )
+
+    def ingest_snapshot(self, snapshot: TrafficSnapshot) -> dict:
+        self.store.add(snapshot)
+        self.last_ingested_at = snapshot.timestamp
+        self.active_alert = (
+            f"Snapshot received from {snapshot.source}. "
+            "SUMO metrics remain the primary live source."
+        )
+        return {
+            "accepted": True,
+            "segment_count": len(snapshot.segments),
+            "timestamp": snapshot.timestamp,
+            "mode": self.data_source,
+        }
 
     def latest_summary(self) -> DashboardSummary | None:
         latest = self.store.latest()

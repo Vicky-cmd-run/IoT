@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     sumo_config: str = "../simulation/config.sumocfg"
     map_provider: str = "osm"
     openweather_api_key: str = ""
+    tomtom_api_key: str = ""
     database_url: str = "postgresql://postgres:change_me@db:5432/smart_traffic"
     jwt_secret: str = ""
     jwt_algorithm: str = "HS256"

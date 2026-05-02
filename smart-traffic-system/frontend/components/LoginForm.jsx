@@ -1,5 +1,4 @@
 import { useState } from "react";
-import { Building2, Lock, Sparkles } from "lucide-react";
 
 export default function LoginForm({ onLogin, status }) {
   const [email, setEmail] = useState("vigneshgnanasekaran8@gmail.com");
@@ -15,43 +14,43 @@ export default function LoginForm({ onLogin, status }) {
 
   return (
     <main className="app-shell auth-shell">
-      <section className="panel auth-panel">
-        <div className="eyebrow"><Sparkles size={14} /> FlowSync AI</div>
-        <h1 className="hero-title">Sign in to the investor demo</h1>
-        <p className="hero-text">
-          A predictive mobility platform for cities, campuses, and high-density corridors.
-          Use the secure demo login to show the digital twin, optimization engine, and route intelligence in action.
-        </p>
-        <div className="auth-proof">
-          <div className="auth-proof-item">
-            <Building2 size={16} />
-            <span>Smart-city SaaS positioning</span>
-          </div>
-          <div className="auth-proof-item">
-            <Lock size={16} />
-            <span>Protected operations dashboard</span>
-          </div>
+      <section className="panel auth-panel simple-auth-panel">
+        <div className="auth-header">
+          <h1>Traffic Control Login</h1>
+          <p className="subtle-text">
+            Sign in to access live monitoring, ingestion, and routing controls.
+          </p>
         </div>
 
         <form className="auth-form" onSubmit={handleSubmit}>
-          <label>
+          <label className="field-label" htmlFor="email">
             Email
-            <input value={email} onChange={(event) => setEmail(event.target.value)} type="email" />
           </label>
-          <label>
+          <input
+            id="email"
+            className="text-input"
+            onChange={(event) => setEmail(event.target.value)}
+            type="email"
+            value={email}
+          />
+
+          <label className="field-label" htmlFor="password">
             Password
-            <input
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              type="password"
-            />
           </label>
-          <button className="auth-button" disabled={loading} type="submit">
-            {loading ? "Opening demo..." : "Enter dashboard"}
+          <input
+            id="password"
+            className="text-input"
+            onChange={(event) => setPassword(event.target.value)}
+            type="password"
+            value={password}
+          />
+
+          <button className="primary-button auth-submit" disabled={loading} type="submit">
+            {loading ? "Signing in..." : "Sign in"}
           </button>
         </form>
 
-        <div className="status-pill">{status}</div>
+        <div className="status-banner compact-banner">{status}</div>
       </section>
     </main>
   );

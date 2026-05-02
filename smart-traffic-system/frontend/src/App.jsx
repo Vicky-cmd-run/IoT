@@ -20,12 +20,13 @@ export default function App() {
   const [summary, setSummary]         = useState(fallbackSummary);
   const [prediction, setPrediction]   = useState({ predictions: [] });
   const [weather, setWeather]         = useState(null);
+  const [traffic, setTraffic]         = useState(null);
   const [mapConfig, setMapConfig]     = useState(null);
   const [simulation, setSimulation]   = useState(null);
   const [commands, setCommands]       = useState([]);
-  const [status, setStatus]           = useState("Sign in to open the demo control room.");
+  const [status, setStatus]           = useState("Sign in to access the dashboard.");
   const [lastUpdated, setLastUpdated] = useState(null);
-  const [demoStep, setDemoStep]       = useState("");
+  const [workflowStep, setWorkflowStep] = useState("");
   const [token, setToken]             = useState(() => window.localStorage.getItem(TOKEN_KEY));
 
   const fetchWithAuth = async (path, options = {}) => {
@@ -56,12 +57,13 @@ export default function App() {
       setSummary(liveData.summary || fallbackSummary);
       setPrediction(liveData.prediction || { predictions: [] });
       setWeather(liveData.weather || null);
+      setTraffic(liveData.traffic || null);
       setSimulation(liveData.simulation || null);
       setCommands(liveData.commands || []);
       setMapConfig(mapData);
       setLastUpdated(new Date());
       if (!preserveStatus) {
-        setStatus("Demo live. Controls are connected and updates are streaming.");
+        setStatus("Dashboard connected.");
       }
     });
   };
@@ -76,7 +78,7 @@ export default function App() {
         await loadDashboard(options);
       } catch {
         if (!active) return;
-        setStatus("Session expired or backend not reachable.");
+        setStatus("Session expired or backend is not reachable.");
       }
     };
 
@@ -100,14 +102,14 @@ export default function App() {
       });
 
       if (!response.ok) {
-        setStatus("Login failed. Check the demo credentials.");
+        setStatus("Login failed. Check credentials.");
         return;
       }
 
       const data = await response.json();
       window.localStorage.setItem(TOKEN_KEY, data.access_token);
       setToken(data.access_token);
-      setStatus(`Signed in as ${data.admin_email}. Demo is ready.`);
+      setStatus(`Signed in as ${data.admin_email}.`);
     } catch {
       setStatus("Backend not reachable yet.");
     }
@@ -122,62 +124,69 @@ export default function App() {
         body: payload ? JSON.stringify(payload) : undefined,
       });
       await loadDashboard({ preserveStatus: true });
-      setStatus("Change applied. Demo view refreshed.");
+      setStatus("Change applied.");
     } catch {
-      setStatus("Command failed. Control loop did not confirm execution.");
+      setStatus("Command failed.");
     }
   };
 
   const handleJourneyPlan = async ({ source_zone, destination_zone }) => {
     try {
-      setStatus("Creating demo journey...");
+      setStatus("Creating journey...");
       await fetchWithAuth("/journey/plan", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ source_zone, destination_zone }),
       });
       await loadDashboard({ preserveStatus: true });
-      setStatus("Journey created. Route comparison and ETA are now live.");
+      setStatus("Journey created.");
     } catch {
-      setStatus("Journey planning failed for that zone pair.");
+      setStatus("Journey planning failed for that route.");
     }
   };
 
-  /**
-   * Guided demo — carefully sequenced so:
-   * 1. Engine resets and restarts cleanly
-   * 2. Scenario congestion is injected
-   * 3. We wait for several simulation ticks so zones have realistic varied congestion
-   * 4. Only then do we plan the journey — so route comparison is meaningful
-   */
-  const runGuidedDemo = async () => {
+  const handleIngestSnapshot = async (payload) => {
     try {
-      setDemoStep("Resetting simulation…");
-      setStatus("Guided demo: resetting simulation state…");
+      setStatus("Sending live snapshot...");
+      await fetchWithAuth("/ingest/snapshot", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      await loadDashboard({ preserveStatus: true });
+      setStatus("Live snapshot ingested.");
+    } catch {
+      setStatus("Snapshot ingestion failed.");
+    }
+  };
+
+  const runWorkflow = async () => {
+    try {
+      setWorkflowStep("Resetting state");
+      setStatus("Resetting simulation state...");
       await fetchWithAuth("/simulation/reset", { method: "POST" });
       await sleep(600);
 
-      setDemoStep("Starting engine…");
-      setStatus("Guided demo: starting the simulation engine…");
+      setWorkflowStep("Starting engine");
+      setStatus("Starting simulation engine...");
       await fetchWithAuth("/simulation/start", { method: "POST" });
       await sleep(800);
 
-      setDemoStep("Injecting scenario: Accident");
-      setStatus("Guided demo: injecting accident congestion scenario…");
+      setWorkflowStep("Applying scenario");
+      setStatus("Applying accident scenario...");
       await fetchWithAuth("/simulation/scenario", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ scenario: "accident" }),
       });
 
-      // Wait for congestion to propagate across zones (≥4 simulation ticks)
-      setDemoStep("Building congestion…");
-      setStatus("Guided demo: waiting for congestion to build across zones…");
+      setWorkflowStep("Collecting updates");
+      setStatus("Waiting for live updates...");
       await sleep(4000);
       await loadDashboard({ preserveStatus: true });
 
-      setDemoStep("Enabling AI optimization");
-      setStatus("Guided demo: enabling adaptive AI optimization…");
+      setWorkflowStep("Enabling optimization");
+      setStatus("Enabling optimization...");
       await fetchWithAuth("/simulation/optimization", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -185,8 +194,8 @@ export default function App() {
       });
       await sleep(800);
 
-      setDemoStep("Planning West → East journey");
-      setStatus("Guided demo: creating a West → East journey through the accident zone…");
+      setWorkflowStep("Planning journey");
+      setStatus("Planning West to East journey...");
       await fetchWithAuth("/journey/plan", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -196,14 +205,11 @@ export default function App() {
       await sleep(600);
       await loadDashboard({ preserveStatus: true });
 
-      setDemoStep("Demo ready ✓");
-      setStatus(
-        "Guided demo ready. You should now see heterogeneous zone congestion, a live route, " +
-        "and a route comparison with different risk scores.",
-      );
+      setWorkflowStep("Complete");
+      setStatus("Workflow run completed.");
     } catch {
-      setDemoStep("");
-      setStatus("Guided demo could not complete — check backend connectivity.");
+      setWorkflowStep("");
+      setStatus("Workflow run failed.");
     }
   };
 
@@ -218,17 +224,20 @@ export default function App() {
       simulation={simulation}
       prediction={prediction}
       weather={weather}
+      traffic={traffic}
       mapConfig={mapConfig}
       onScenarioChange={(scenario) => runControl("/simulation/scenario", { scenario })}
       onSimulationStart={() => runControl("/simulation/start")}
       onSimulationStop={() => runControl("/simulation/stop")}
       onSimulationReset={() => runControl("/simulation/reset")}
+      onApplySignalPlan={() => runControl("/signal-plan/apply")}
       onToggleOptimization={(enabled) => runControl("/simulation/optimization", { enabled })}
       onPlanJourney={handleJourneyPlan}
-      onRunGuidedDemo={runGuidedDemo}
+      onIngestSnapshot={handleIngestSnapshot}
+      onRunWorkflow={runWorkflow}
       status={status}
       lastUpdated={lastUpdated}
-      demoStep={demoStep}
+      workflowStep={workflowStep}
     />
   );
 }
